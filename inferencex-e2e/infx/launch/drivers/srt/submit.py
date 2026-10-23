@@ -172,7 +172,7 @@ def apply(
 
 
 def _job(backend: SlurmBackend, job_id: str, output: Path) -> SlurmJob:
-    """The submitted job, with the sweep and worker logs it writes and the output directory it fills."""
+    """The submitted job, with its sweep and worker logs and the output directory it fills."""
     log = output / "logs" / f"sweep_{job_id}.log"
     return backend.attach(job_id, log=log, also_logs=WORKER_LOGS, outputs=output)
 

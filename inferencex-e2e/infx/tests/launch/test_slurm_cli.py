@@ -43,7 +43,9 @@ def fake_bin(tmp_path, monkeypatch):
 
 def recorder(log: Path) -> str:
     """Bash snippet appending the invocation's argv as a JSON line to ``log``."""
-    return f"{sys.executable} -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> {log}"
+    return (
+        f"{sys.executable} -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> {log}"
+    )
 
 
 def calls(log: Path) -> list[list[str]]:
@@ -53,123 +55,68 @@ def calls(log: Path) -> list[list[str]]:
 
 def test_salloc_returns_granted_job_and_requests_no_shell(fake_bin, tmp_path):
     log = tmp_path / "salloc.log"
-    fake_bin(
-        "salloc",
-        f"{recorder(log)}\n"
-        "echo 'salloc: Pending job allocation 5150' >&2\n"
-        "echo 'salloc: Granted job allocation 5150' >&2",
-    )
-    resources = Resources(
-        partition="h200",
-        account="bench",
-        time_min=180,
-        job_name="runner_0",
-        gres="gpu:h200:8",
-        exclude=("n1", "n2"),
-    )
+    fake_bin("salloc", f"{recorder(log)}\n"
+             "echo 'salloc: Pending job allocation 5150' >&2\n"
+             "echo 'salloc: Granted job allocation 5150' >&2")
+    resources = Resources(partition="h200", account="bench", time_min=180, job_name="runner_0",
+                          gres="gpu:h200:8", exclude=("n1", "n2"))
     assert salloc(resources, extra=("--exclusive",)) == Job("5150")
     [argv] = calls(log)
     assert argv[-1] == "--no-shell"
-    assert {
-        "--partition=h200",
-        "--account=bench",
-        "--time=180",
-        "--job-name=runner_0",
-        "--gres=gpu:h200:8",
-        "--exclude=n1,n2",
-        "--exclusive",
-        "--nodes=1",
-    } <= set(argv)
+    assert {"--partition=h200", "--account=bench", "--time=180", "--job-name=runner_0",
+            "--gres=gpu:h200:8", "--exclude=n1,n2", "--exclusive", "--nodes=1"} <= set(argv)
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        "echo 'salloc: Job allocation 12 has been revoked.' >&2; exit 0",
-        "echo 'salloc: Granted job allocation 12' >&2; exit 1",
-    ],
-)
+@pytest.mark.parametrize("body", [
+    "echo 'salloc: Job allocation 12 has been revoked.' >&2; exit 0",
+    "echo 'salloc: Granted job allocation 12' >&2; exit 1",
+])
 def test_salloc_without_a_grant_fails(fake_bin, body):
     fake_bin("salloc", body)
     with pytest.raises(SlurmError, match="salloc failed"):
         salloc(Resources(partition="p", account=None, time_min=10, job_name="n"))
 
 
-@pytest.mark.parametrize(
-    "record,state,exit_code,nodes",
-    [
-        ("COMPLETED|0:0|gpu[01-02]", JobState.SUCCEEDED, 0, "gpu[01-02]"),
-        ("FAILED|1:0|gpu03", JobState.FAILED, 1, "gpu03"),
-        ("COMPLETED|0:15", JobState.FAILED, 0, None),
-        ("CANCELLED by 1001|0:0|None assigned", JobState.CANCELLED, 0, None),
-    ],
-)
-def test_final_status_maps_allocation_accounting(
-    fake_bin, tmp_path, record, state, exit_code, nodes
-):
+@pytest.mark.parametrize("record,state,exit_code,nodes", [
+    ("COMPLETED|0:0|gpu[01-02]", JobState.SUCCEEDED, 0, "gpu[01-02]"),
+    ("FAILED|1:0|gpu03", JobState.FAILED, 1, "gpu03"),
+    ("COMPLETED|0:15", JobState.FAILED, 0, None),
+    ("CANCELLED by 1001|0:0|None assigned", JobState.CANCELLED, 0, None),
+])
+def test_final_status_maps_allocation_accounting(fake_bin, tmp_path, record, state, exit_code, nodes):
     log = tmp_path / "sacct.log"
     fake_bin("sacct", f"{recorder(log)}\necho '{record}'")
     status = final_status(Job("42"), delay_s=0)
     assert (status.state, status.exit_code, status.nodes) == (state, exit_code, nodes)
-    assert calls(log) == [
-        ["-X", "-n", "-P", "-j", "42", "--format=State,ExitCode,NodeList,Submit,Start,End"]
-    ]
+    assert calls(log) == [["-X", "-n", "-P", "-j", "42", "--format=State,ExitCode,NodeList,Submit,Start,End"]]
 
 
 def test_final_status_reads_the_accounting_times_as_epoch_seconds(fake_bin):
-    fake_bin(
-        "sacct",
-        'if [ "$SLURM_TIME_FORMAT" = "%s" ]; then echo "FAILED|1:0|gpu03|1791547200|1791548100|Unknown"; '
-        'else echo "FAILED|1:0|gpu03|2026-10-09T12:00:00|2026-10-09T12:15:00|Unknown"; fi',
-    )
+    fake_bin("sacct", 'if [ "$SLURM_TIME_FORMAT" = "%s" ]; then echo "FAILED|1:0|gpu03|1791547200|1791548100|Unknown"; '
+             'else echo "FAILED|1:0|gpu03|2026-10-09T12:00:00|2026-10-09T12:15:00|Unknown"; fi')
     status = final_status(Job("42"), delay_s=0)
     assert (status.submitted_at, status.started_at, status.ended_at) == (
-        datetime(2026, 10, 9, 12, 0, tzinfo=UTC),
-        datetime(2026, 10, 9, 12, 15, tzinfo=UTC),
-        None,
+        datetime(2026, 10, 9, 12, 0, tzinfo=UTC), datetime(2026, 10, 9, 12, 15, tzinfo=UTC), None,
     )
 
 
-@pytest.mark.parametrize(
-    "readings,state",
-    [
-        (["COMPLETING|0:0", "COMPLETING|0:0", "COMPLETED|0:0"], JobState.SUCCEEDED),
-        (["RUNNING|0:0"] * 3, JobState.RUNNING),
-    ],
-)
-def test_final_status_retries_unsettled_accounting_up_to_its_attempts(
-    fake_bin, tmp_path, readings, state
-):
+@pytest.mark.parametrize("readings,state", [
+    (["COMPLETING|0:0", "COMPLETING|0:0", "COMPLETED|0:0"], JobState.SUCCEEDED),
+    (["RUNNING|0:0"] * 3, JobState.RUNNING),
+])
+def test_final_status_retries_unsettled_accounting_up_to_its_attempts(fake_bin, tmp_path, readings, state):
     counter = tmp_path / "count"
-    fake_bin(
-        "sacct",
-        f"n=$(cat {counter} 2>/dev/null || echo 0); echo $((n+1)) > {counter}\n"
-        f'readings=({" ".join(repr(reading) for reading in readings)}); echo "${{readings[$n]}}"',
-    )
+    fake_bin("sacct", f"n=$(cat {counter} 2>/dev/null || echo 0); echo $((n+1)) > {counter}\n"
+             f"readings=({' '.join(repr(reading) for reading in readings)}); echo \"${{readings[$n]}}\"")
     assert final_status(Job("42"), attempts=3, delay_s=0).state is state
     assert counter.read_text().strip() == "3"
 
 
-@pytest.mark.parametrize(
-    "controller,state,nodes",
-    [
-        (
-            "JobId=42 JobName=x JobState=COMPLETED Reason=None ExitCode=0:0 NodeList=gpu07",
-            JobState.SUCCEEDED,
-            "gpu07",
-        ),
-        (
-            "JobId=42 JobName=x JobState=FAILED Reason=NonZeroExitCode ExitCode=3:0 NodeList=(null)",
-            JobState.FAILED,
-            None,
-        ),
-        (
-            "JobId=420 JobName=x JobState=COMPLETED ExitCode=0:0 NodeList=gpu07",
-            JobState.UNKNOWN,
-            None,
-        ),
-    ],
-)
+@pytest.mark.parametrize("controller,state,nodes", [
+    ("JobId=42 JobName=x JobState=COMPLETED Reason=None ExitCode=0:0 NodeList=gpu07", JobState.SUCCEEDED, "gpu07"),
+    ("JobId=42 JobName=x JobState=FAILED Reason=NonZeroExitCode ExitCode=3:0 NodeList=(null)", JobState.FAILED, None),
+    ("JobId=420 JobName=x JobState=COMPLETED ExitCode=0:0 NodeList=gpu07", JobState.UNKNOWN, None),
+])
 def test_final_status_falls_back_to_controller_without_sacct(fake_bin, controller, state, nodes):
     fake_bin("scontrol", f"echo '{controller}'")
     status = final_status(Job("42"), attempts=3, delay_s=0)
@@ -216,9 +163,7 @@ def slurm_backend() -> slurm.SlurmBackend:
     """A Slurm backend for runner ``c_0`` of a minimal cluster."""
     record = {"gpus-per-node": 8, "arch": "x86_64", "scheduler": "slurm",
               "slurm": {"partition": "p", "exclusive": True}}  # fmt: skip
-    cluster = load_inventory(
-        {"labels": {"cluster:c": ["c_0"]}, "clusters": {"c": record}}
-    ).clusters["c"]
+    cluster = load_inventory({"labels": {"cluster:c": ["c_0"]}, "clusters": {"c": record}}).clusters["c"]
     return slurm.SlurmBackend(cluster, LaunchRequest.from_env({"RUNNER_NAME": "c_0"}), Lifecycle())
 
 
@@ -235,9 +180,7 @@ def test_backend_cancel_waits_until_a_listed_job_leaves_the_queue(fake_bin, tmp_
     assert queue_state(Job("4242")) is None
 
 
-def test_workflow_cleanup_cancels_the_runners_jobs_and_those_srtctl_submitted(
-    fake_bin, tmp_path, monkeypatch
-):
+def test_workflow_cleanup_cancels_the_runners_jobs_and_those_srtctl_submitted(fake_bin, tmp_path, monkeypatch):
     scancel, squeue = tmp_path / "scancel.log", tmp_path / "squeue.log"
     fake_bin("scancel", recorder(scancel))
     fake_bin("squeue", recorder(squeue))
@@ -246,8 +189,7 @@ def test_workflow_cleanup_cancels_the_runners_jobs_and_those_srtctl_submitted(
     slurm.SlurmBackend.cleanup(None, "b300-dsxe_03")
 
     assert calls(scancel) == [
-        ["--user=runner", "--name=b300-dsxe_03"],
-        ["--user=runner", "--name=inferencex-b300-dsxe_03"],
+        ["--user=runner", "--name=b300-dsxe_03"], ["--user=runner", "--name=inferencex-b300-dsxe_03"],
     ]
     [query] = calls(squeue)
     assert "--name=b300-dsxe_03,inferencex-b300-dsxe_03" in query
@@ -264,6 +206,4 @@ def test_a_container_step_killed_by_a_signal_reports_the_shell_exit_code():
 
 def test_srun_rejects_env_value_that_would_split_export():
     with pytest.raises(ValueError, match="UCX_NET_DEVICES"):
-        srun_argv(
-            None, ["true"], container=ContainerSpec(image="i", env={"UCX_NET_DEVICES": "a,b"})
-        )
+        srun_argv(None, ["true"], container=ContainerSpec(image="i", env={"UCX_NET_DEVICES": "a,b"}))
