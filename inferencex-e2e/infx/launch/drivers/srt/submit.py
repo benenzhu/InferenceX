@@ -29,6 +29,8 @@ SINGLE_NODE_SUBMISSION = "srt-single-node-submission.json"
 MULTINODE_SUBMISSION = "srt-submission.json"
 ACCEPTANCE_RECORD = "golden-acceptance.json"
 BIND_LOG = "srt-bind.log"
+# srtctl's aggregated workers write the engine output next to the sweep log.
+WORKER_LOGS = ("*_agg_w*.out",)
 MULTINODE_EVAL_COMMAND = (
     '["env", "HF_HUB_OFFLINE=0", "HF_DATASETS_OFFLINE=0", "TRANSFORMERS_OFFLINE=0", '
     '"MODEL_PATH=/model", "bash", "{infmax_workspace}/benchmarks/multi_node/srt_eval.sh", "{endpoint}", '
@@ -170,8 +172,9 @@ def apply(
 
 
 def _job(backend: SlurmBackend, job_id: str, output: Path) -> SlurmJob:
-    """The submitted job, with the sweep log it writes and the output directory it fills."""
-    return backend.attach(job_id, log=output / "logs" / f"sweep_{job_id}.log", outputs=output)
+    """The submitted job, with the sweep and worker logs it writes and the output directory it fills."""
+    log = output / "logs" / f"sweep_{job_id}.log"
+    return backend.attach(job_id, log=log, also_logs=WORKER_LOGS, outputs=output)
 
 
 @dataclass

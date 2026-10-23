@@ -66,6 +66,8 @@ class SlurmJob(Job):
     """A Slurm job: an allocation running one of our container steps, or an adopted job."""
 
     log: Path | None = None
+    # Globs of the logs next to ``log`` that are followed with it once they appear.
+    also_logs: tuple[str, ...] = ()
     outputs: Path | None = None
     step: subprocess.Popen[bytes] | None = field(default=None, compare=False, repr=False)
 
@@ -162,7 +164,7 @@ class SlurmBackend(Backend):
         else:
             with event.stage("run"):
                 cli.wait_for_log(job, job.log)
-                cli.follow_log(job, job.log)
+                cli.follow_log(job, job.log, also=job.also_logs)
 
     @override
     def state(self, job: Job) -> JobStatus:
@@ -317,10 +319,17 @@ class SlurmBackend(Backend):
         return self._followed(SlurmJob(job.id, log=log))
 
     def attach(
-        self, job_id: str, *, log: Path | None = None, outputs: Path | None = None
+        self,
+        job_id: str,
+        *,
+        log: Path | None = None,
+        also_logs: Sequence[str] = (),
+        outputs: Path | None = None,
     ) -> SlurmJob:
         """Follow a job another tool submitted; the caller decides when to cancel it."""
-        return self._followed(SlurmJob(job_id, log=log, outputs=outputs))
+        return self._followed(
+            SlurmJob(job_id, log=log, also_logs=tuple(also_logs), outputs=outputs)
+        )
 
     def _followed(self, job: SlurmJob) -> SlurmJob:
         """``job`` as the launch's recorded Slurm job; its log explains later failures."""

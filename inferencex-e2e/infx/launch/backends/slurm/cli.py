@@ -19,6 +19,7 @@ from infx.launch import proc
 from infx.launch.backends.base import BackendError, Job, JobState, JobStatus
 
 _GRANTED = re.compile(r"Granted job allocation ([1-9][0-9]*)")
+FOLLOW_POLL_S = 10.0
 
 
 class SlurmError(BackendError):
@@ -276,21 +277,38 @@ def wait_for_log(job: Job, path: Path, *, wait_s: float = 5.0) -> None:
         time.sleep(wait_s)
 
 
-def follow_log(job: Job, path: Path) -> None:
-    """Print ``path`` as it grows until ``job`` leaves the queue."""
+def follow_log(job: Job, path: Path, *, also: Sequence[str] = ()) -> None:
+    """Print ``path`` as it grows until ``job`` leaves the queue.
+
+    Files next to ``path`` that match an ``also`` glob are printed too, from when they appear.
+    """
     sentinel = subprocess.Popen(["sleep", "2147483647"])
-    print(f"Tailing {path}", file=sys.stderr, flush=True)
-    tail_argv = ["tail", "-F", "-s", "2", "-n+1", str(path), f"--pid={sentinel.pid}"]
-    echo(tail_argv)
-    tail = subprocess.Popen(tail_argv, stderr=subprocess.DEVNULL)
+    tails: dict[Path, subprocess.Popen[bytes]] = {}
+
+    def follow(log: Path) -> None:
+        print(f"Tailing {log}", file=sys.stderr, flush=True)
+        tail_argv = ["tail", "-F", "-s", "2", "-n+1", str(log), f"--pid={sentinel.pid}"]
+        echo(tail_argv)
+        tails[log] = subprocess.Popen(tail_argv, stderr=subprocess.DEVNULL)
+
+    def follow_new() -> None:
+        for pattern in also:
+            for log in sorted(path.parent.glob(pattern)):
+                if log not in tails:
+                    follow(log)
+
+    follow(path)
     try:
         while queue_state(job, echo_command=False) is not None:
-            time.sleep(10)
+            follow_new()
+            time.sleep(FOLLOW_POLL_S)
+        follow_new()
     finally:
         sentinel.kill()
         sentinel.wait()
-        try:
-            tail.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            tail.kill()
-            tail.wait()
+        for tail in tails.values():
+            try:
+                tail.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                tail.kill()
+                tail.wait()
